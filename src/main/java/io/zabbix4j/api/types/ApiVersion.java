@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
  * The version string is expected in the format "X.Y.Z" (e.g., "7.2.0").
  * This class is immutable.
  *
- * @author Your Name
+ * @author CSJ
  */
 public final class ApiVersion implements Comparable<ApiVersion> {
 

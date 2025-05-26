@@ -52,7 +52,22 @@
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <version>${logback.version}</version>
-            <scope>runtime</scope> <!-- Typically runtime or test scope -->
+            <scope>compile</scope> <!-- Changed to compile for custom converter -->
+        </dependency>
+
+        <!-- JSON Library -->
+        <dependency>
+            <groupId>org.json</groupId>
+            <artifactId>json</artifactId>
+            <version>20231013</version> <!-- Ensure this is a recent, stable version -->
+        </dependency>
+
+        <!-- OkHttp MockWebServer for API tests -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <version>4.12.0</version> <!-- Check for the latest stable version -->
+            <scope>test</scope>
         </dependency>
     </dependencies>
 

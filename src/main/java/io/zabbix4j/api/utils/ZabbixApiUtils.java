@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
  * Utility class for Zabbix API related helper functions.
  * This class contains static methods and cannot be instantiated.
  *
- * @author Your Name
+ * @author CSJ
  */
 public final class ZabbixApiUtils {
 
