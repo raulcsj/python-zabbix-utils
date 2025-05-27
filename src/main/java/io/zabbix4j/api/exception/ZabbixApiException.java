@@ -7,7 +7,7 @@ package io.zabbix4j.api.exception;
  *
  * @author Your Name
  */
-public class ZabbixApiException extends Exception {
+public class ZabbixApiException extends RuntimeException { // Changed from Exception to RuntimeException
 
     /**
      * Constructs a new ZabbixApiException with the specified detail message.

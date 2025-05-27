@@ -120,10 +120,11 @@ public final class AsyncGetter {
         logger.debug("Async getting key '{}' from agent {}:{}", key, host, port);
 
         final CompletableFuture<AgentResponse> future = new CompletableFuture<>();
-        AsynchronousSocketChannel channel = null;
+        AsynchronousSocketChannel openedChannel = null;
 
         try {
-            channel = AsynchronousSocketChannel.open();
+            openedChannel = AsynchronousSocketChannel.open();
+            final AsynchronousSocketChannel channel = openedChannel; // Effectively final for lambdas/inner classes
 
             if (sourceIp != null) {
                 logger.debug("Binding to source IP: {}", sourceIp);
@@ -132,26 +133,33 @@ public final class AsyncGetter {
             }
 
             SocketAddress serverAddress = new InetSocketAddress(host, port);
-            byte[] requestPacket = ZabbixProtocol.createPacket(key, false); // No compression for agent
+            final byte[] requestPacket = ZabbixProtocol.createPacket(key, false); // No compression for agent
 
             // Schedule a timeout for the entire operation
             CompletableFuture<Void> timeoutFuture = new CompletableFuture<>();
             ScheduledExecutor.SCHEDULER.schedule(() -> {
-                if (!future.isDone()) {
-                    timeoutFuture.completeExceptionally(new ZabbixProcessingException("Overall operation timeout after " + timeout + "ms for key: " + key));
+                if (!future.isDone() && !timeoutFuture.isDone()) {
+                    // Complete with a generic RuntimeException. The specific ZabbixProcessingException
+                    // will be created in the timeoutFuture's exceptionally block.
+                    timeoutFuture.completeExceptionally(new RuntimeException("Overall operation timeout after " + timeout + "ms for key: " + key));
                 }
             }, timeout, TimeUnit.MILLISECONDS);
             
             future.exceptionally(ex -> { // Ensure channel closure on premature future completion
-                closeChannel(channel, "Future completed exceptionally before full operation.");
+                closeChannel(channel, "Future completed exceptionally before full operation (" + ex.getMessage() + ")");
                 return null; 
             });
-            timeoutFuture.exceptionally(ex -> { // If timeoutFuture completes exceptionally
-                future.completeExceptionally(ex);
-                closeChannel(channel, "Operation timed out.");
+
+            // This block now handles converting the RuntimeException from the scheduler into the desired ZabbixProcessingException
+            timeoutFuture.exceptionally(ex -> { 
+                if (!future.isDone()) {
+                    // Create the specific ZabbixProcessingException here
+                    ZabbixProcessingException zpe = new ZabbixProcessingException(ex.getMessage(), ex);
+                    future.completeExceptionally(zpe);
+                }
+                closeChannel(channel, "Operation timed out or scheduler error (" + ex.getMessage() + ")");
                 return null;
             });
-
 
             channel.connect(serverAddress, null, new CompletionHandler<Void, Void>() {
                 @Override
@@ -161,7 +169,7 @@ public final class AsyncGetter {
                     channel.write(writeBuffer, timeout, TimeUnit.MILLISECONDS, null, new CompletionHandler<Integer, Void>() {
                         @Override
                         public void completed(Integer bytesWritten, Void attachment) {
-                            if (bytesWritten < requestPacket.length) {
+                            if (bytesWritten < requestPacket.length) { // requestPacket is effectively final
                                 String errorMsg = "Incomplete write to agent. Wrote " + bytesWritten + "/" + requestPacket.length + " bytes.";
                                 logger.error(errorMsg);
                                 future.completeExceptionally(new ZabbixProcessingException(errorMsg));
@@ -174,7 +182,7 @@ public final class AsyncGetter {
 
                         @Override
                         public void failed(Throwable exc, Void attachment) {
-                            logger.error("Failed to write to agent {}:{}: {}", host, port, exc.getMessage(), exc);
+                            logger.error("Failed to write to agent {}:{}: {}", host, port, exc.getMessage(), exc); // host, port are fields
                             future.completeExceptionally(new ZabbixProcessingException("Failed to write to agent", exc));
                             closeChannel(channel, "Write failed.");
                         }
@@ -183,7 +191,7 @@ public final class AsyncGetter {
 
                 @Override
                 public void failed(Throwable exc, Void attachment) {
-                    logger.error("Failed to connect to agent {}:{}: {}", host, port, exc.getMessage(), exc);
+                    logger.error("Failed to connect to agent {}:{}: {}", host, port, exc.getMessage(), exc);  // host, port are fields
                     future.completeExceptionally(new ZabbixProcessingException("Failed to connect to agent", exc));
                     closeChannel(channel, "Connect failed.");
                 }
@@ -192,14 +200,14 @@ public final class AsyncGetter {
         } catch (IOException e) {
             logger.error("Error opening or binding AsynchronousSocketChannel: {}", e.getMessage(), e);
             future.completeExceptionally(new ZabbixProcessingException("Error setting up connection", e));
-            closeChannel(channel, "Setup failed.");
+            closeChannel(openedChannel, "Setup failed."); // Use openedChannel here as 'channel' might not be initialized
         }
         return future;
     }
 
-    private void readHeader(AsynchronousSocketChannel channel, CompletableFuture<AgentResponse> future) {
+    private void readHeader(final AsynchronousSocketChannel channel, final CompletableFuture<AgentResponse> future) { // Make params final
         ByteBuffer headerReadBuffer = ByteBuffer.allocate(ZabbixProtocol.HEADER_SIZE);
-        channel.read(headerReadBuffer, timeout, TimeUnit.MILLISECONDS, null, new CompletionHandler<Integer, Void>() {
+        channel.read(headerReadBuffer, timeout, TimeUnit.MILLISECONDS, null, new CompletionHandler<Integer, Void>() { // timeout is a field
             @Override
             public void completed(Integer bytesRead, Void attachment) {
                 if (bytesRead < ZabbixProtocol.HEADER_SIZE) {
@@ -244,30 +252,29 @@ public final class AsyncGetter {
                     closeChannel(channel, "Invalid data length.");
                     return;
                 }
-                 if (dataLength == 0) { // Handle empty payload case
+                if (dataLength == 0) { // Handle empty payload case
                     logger.debug("Empty payload received.");
-                    future.complete(new AgentResponse(""));
+                    future.complete(new AgentResponse("")); // AgentResponse is a record, fine
                     closeChannel(channel, "Empty payload processed.");
                     return;
                 }
 
-
                 logger.debug("Header parsed. Data length: {}. Reading payload...", dataLength);
-                readPayload(channel, future, dataLength, (flags & ZabbixProtocol.FLAGS_COMPRESSION) != 0);
+                readPayload(channel, future, dataLength, (flags & ZabbixProtocol.FLAGS_COMPRESSION) != 0); // dataLength, flags are local, effectively final
             }
 
             @Override
             public void failed(Throwable exc, Void attachment) {
-                logger.error("Failed to read header from agent {}:{}: {}", host, port, exc.getMessage(), exc);
+                logger.error("Failed to read header from agent {}:{}: {}", host, port, exc.getMessage(), exc); // host, port fields
                 future.completeExceptionally(new ZabbixProcessingException("Failed to read header", exc));
                 closeChannel(channel, "Header read failed.");
             }
         });
     }
 
-    private void readPayload(AsynchronousSocketChannel channel, CompletableFuture<AgentResponse> future, int dataLength, boolean isCompressed) {
+    private void readPayload(final AsynchronousSocketChannel channel, final CompletableFuture<AgentResponse> future, final int dataLength, final boolean isCompressed) { // Make params final
         ByteBuffer payloadBuffer = ByteBuffer.allocate(dataLength);
-        channel.read(payloadBuffer, timeout, TimeUnit.MILLISECONDS, null, new CompletionHandler<Integer, Void>() {
+        channel.read(payloadBuffer, timeout, TimeUnit.MILLISECONDS, null, new CompletionHandler<Integer, Void>() { // timeout field
             @Override
             public void completed(Integer bytesRead, Void attachment) {
                 if (bytesRead < dataLength) {
@@ -286,56 +293,54 @@ public final class AsyncGetter {
                 byte[] finalPayloadBytes = receivedData;
 
                 if (isCompressed) {
-                    Inflater inflater = new Inflater();
-                    inflater.setInput(receivedData);
-                    try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                        byte[] buffer = new byte[1024];
-                        while (!inflater.finished()) {
-                            int count = inflater.inflate(buffer);
-                            if (count == 0 && inflater.needsInput() && !inflater.finished()) {
-                                // Should not happen if dataLength was correct for compressed data
-                                throw new ZabbixProcessingException("Inflater needs input, but all compressed data provided.");
+                    try {
+                        Inflater inflater = new Inflater();
+                        inflater.setInput(receivedData);
+                        try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                            byte[] buffer = new byte[1024];
+                            while (!inflater.finished()) {
+                                int count = inflater.inflate(buffer);
+                                if (count == 0 && inflater.needsInput() && !inflater.finished()) {
+                                    throw new ZabbixProcessingException("Inflater needs input, but all compressed data provided.");
+                                }
+                                if (count == 0 && !inflater.finished()) {
+                                    throw new ZabbixProcessingException("Error during decompression: inflater stuck.");
+                                }
+                                if (count > 0) baos.write(buffer, 0, count);
                             }
-                            if (count == 0 && !inflater.finished()) { // No progress but not finished
-                                throw new ZabbixProcessingException("Error during decompression: inflater stuck.");
-                            }
-                            if (count > 0) baos.write(buffer, 0, count);
+                            finalPayloadBytes = baos.toByteArray();
+                        } catch (IOException e) { // For ByteArrayOutputStream
+                            throw new ZabbixProcessingException("Internal error during decompression stream", e);
+                        } finally {
+                            inflater.end();
                         }
-                        finalPayloadBytes = baos.toByteArray();
-                    } catch (DataFormatException e) {
-                        logger.error("Failed to decompress payload: {}", e.getMessage(), e);
-                        future.completeExceptionally(new ZabbixProcessingException("Payload decompression failed", e));
-                        closeChannel(channel, "Decompression failed.");
+                    } catch (DataFormatException | ZabbixProcessingException e) { // Catch ZPE if thrown from within try
+                        logger.error("Failed to decompress or process payload: {}", e.getMessage(), e);
+                        future.completeExceptionally(new ZabbixProcessingException("Payload decompression/processing failed", e));
+                        closeChannel(channel, "Decompression/processing failed.");
                         return;
-                    } catch (IOException e) { // For ByteArrayOutputStream
-                        logger.error("ByteArrayOutputStream error during decompression: {}", e.getMessage(), e);
-                        future.completeExceptionally(new ZabbixProcessingException("Internal error during decompression", e));
-                        closeChannel(channel, "Decompression stream failed.");
-                        return;
-                    } finally {
-                        inflater.end();
                     }
                 }
 
                 String responseString = new String(finalPayloadBytes, StandardCharsets.UTF_8);
                 logger.debug("Payload processed. Response string: {}", responseString);
-                future.complete(new AgentResponse(responseString));
+                future.complete(new AgentResponse(responseString)); // AgentResponse is a record
                 closeChannel(channel, "Successfully processed.");
             }
 
             @Override
             public void failed(Throwable exc, Void attachment) {
-                logger.error("Failed to read payload from agent {}:{}: {}", host, port, exc.getMessage(), exc);
+                logger.error("Failed to read payload from agent {}:{}: {}", host, port, exc.getMessage(), exc); // host, port fields
                 future.completeExceptionally(new ZabbixProcessingException("Failed to read payload", exc));
                 closeChannel(channel, "Payload read failed.");
             }
         });
     }
 
-    private void closeChannel(AsynchronousSocketChannel channel, String reason) {
+    private void closeChannel(final AsynchronousSocketChannel channel, String reason) { // Make param final
         if (channel != null && channel.isOpen()) {
             try {
-                logger.debug("Closing channel to {}:{}. Reason: {}", host, port, reason);
+                logger.debug("Closing channel to {}:{}. Reason: {}", host, port, reason); // host, port fields
                 channel.close();
             } catch (IOException e) {
                 logger.warn("Error closing channel to {}:{}: {}", host, port, e.getMessage(), e);
